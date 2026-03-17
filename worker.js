@@ -1,28 +1,25 @@
 export default {
   async fetch(req, env) {
-    // WebSocket接続判定
+    const url = new URL(req.url);
+
+    // ===== WebSocket =====
     if (req.headers.get("Upgrade") === "websocket") {
-      const url = new URL(req.url);
       const room = url.searchParams.get("room") || "main";
 
-      // ルームごとにDurable Object
       const id = env.CHAT.idFromName(room);
       const obj = env.CHAT.get(id);
 
       return obj.fetch(req);
     }
 
-    return new Response("Chat Worker is running");
+    return new Response("OK");
   }
 };
 
 export class ChatRoom {
-  constructor(state, env) {
+  constructor(state) {
     this.state = state;
-    this.env = env;
-
     this.clients = [];
-    this.lastRead = {}; // {username: timestamp}
   }
 
   async fetch(req) {
@@ -32,62 +29,38 @@ export class ChatRoom {
 
     server.accept();
 
-    // 接続追加
+    // ===== 履歴送信（超重要） =====
+    let history = await this.state.storage.get("history") || [];
+
+    server.send(JSON.stringify({
+      type: "history",
+      messages: history
+    }));
+
     this.clients.push(server);
 
-    // 接続人数送信
     this.broadcast({
       type: "count",
       count: this.clients.length
     });
 
-    // メッセージ受信
-    server.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
+    // ===== 受信 =====
+    server.onmessage = async (e) => {
+      const data = JSON.parse(e.data);
 
-        // ===== メッセージ =====
-        if (data.type === "msg") {
-          const msg = {
-            type: "msg",
-            name: data.name || "名無し",
-            text: data.text || "",
-            time: Date.now()
-          };
-          this.broadcast(msg);
-        }
+      if (data.type === "msg" || data.type === "img") {
+        data.time = Date.now();
 
-        // ===== 画像 =====
-        if (data.type === "img") {
-          const msg = {
-            type: "img",
-            name: data.name || "名無し",
-            img: data.img, // base64
-            time: Date.now()
-          };
-          this.broadcast(msg);
-        }
+        await this.save(data); // ←保存
+        this.broadcast(data);
+      }
 
-        // ===== 既読 =====
-        if (data.type === "read") {
-          const username = data.name || "名無し";
-          const now = Date.now();
-
-          this.lastRead[username] = now;
-
-          this.broadcast({
-            type: "read",
-            name: username,
-            time: now
-          });
-        }
-
-      } catch (err) {
-        console.error("JSON parse error:", err);
+      if (data.type === "read") {
+        this.broadcast(data);
       }
     };
 
-    // 切断処理
+    // ===== 切断 =====
     server.onclose = () => {
       this.clients = this.clients.filter(c => c !== server);
 
@@ -103,17 +76,25 @@ export class ChatRoom {
     });
   }
 
-  // ===== 全員に送信 =====
+  // ===== 履歴保存 =====
+  async save(msg) {
+    let history = await this.state.storage.get("history") || [];
+
+    history.push(msg);
+
+    if (history.length > 100) {
+      history.shift();
+    }
+
+    await this.state.storage.put("history", history);
+  }
+
+  // ===== 全送信 =====
   broadcast(data) {
     const msg = JSON.stringify(data);
 
-    this.clients.forEach(client => {
-      try {
-        client.send(msg);
-      } catch (e) {
-        // 壊れた接続を削除
-        this.clients = this.clients.filter(c => c !== client);
-      }
+    this.clients.forEach(c => {
+      try { c.send(msg); } catch {}
     });
   }
 }
