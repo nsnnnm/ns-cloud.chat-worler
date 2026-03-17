@@ -2,13 +2,11 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
 
-    // ===== WebSocket =====
     if (req.headers.get("Upgrade") === "websocket") {
       const room = url.searchParams.get("room") || "main";
 
       const id = env.CHAT.idFromName(room);
       const obj = env.CHAT.get(id);
-
       return obj.fetch(req);
     }
 
@@ -29,7 +27,6 @@ export class ChatRoom {
 
     server.accept();
 
-    // ===== 履歴送信（超重要） =====
     let history = await this.state.storage.get("history") || [];
 
     server.send(JSON.stringify({
@@ -44,23 +41,29 @@ export class ChatRoom {
       count: this.clients.length
     });
 
-    // ===== 受信 =====
     server.onmessage = async (e) => {
       const data = JSON.parse(e.data);
 
+      // ===== メッセージ =====
       if (data.type === "msg" || data.type === "img") {
         data.time = Date.now();
+        data.id = crypto.randomUUID();
 
-        await this.save(data); // ←保存
+        await this.save(data);
         this.broadcast(data);
       }
 
+      // ===== 既読 =====
       if (data.type === "read") {
+        this.broadcast(data);
+      }
+
+      // ===== 通話シグナリング =====
+      if (data.type === "call" || data.type === "offer" || data.type === "answer" || data.type === "ice") {
         this.broadcast(data);
       }
     };
 
-    // ===== 切断 =====
     server.onclose = () => {
       this.clients = this.clients.filter(c => c !== server);
 
@@ -76,20 +79,16 @@ export class ChatRoom {
     });
   }
 
-  // ===== 履歴保存 =====
   async save(msg) {
     let history = await this.state.storage.get("history") || [];
 
     history.push(msg);
 
-    if (history.length > 100) {
-      history.shift();
-    }
+    if (history.length > 200) history.shift();
 
     await this.state.storage.put("history", history);
   }
 
-  // ===== 全送信 =====
   broadcast(data) {
     const msg = JSON.stringify(data);
 
